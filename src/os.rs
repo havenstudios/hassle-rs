@@ -82,6 +82,7 @@ mod os_defs {
 
 pub use os_defs::*;
 
+#[must_use]
 #[repr(transparent)]
 #[derive(PartialEq, Eq)]
 pub struct HRESULT(pub os_defs::HRESULT);
