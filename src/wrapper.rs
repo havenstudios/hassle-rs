@@ -17,7 +17,7 @@ use std::pin::Pin;
 macro_rules! check_hr {
     ($hr:expr, $v: expr) => {{
         let hr = $hr;
-        if hr == 0 {
+        if !hr.is_err() {
             Ok($v)
         } else {
             Err(hr)
@@ -28,7 +28,7 @@ macro_rules! check_hr {
 macro_rules! check_hr_wrapped {
     ($hr:expr, $v: expr) => {{
         let hr = $hr;
-        if hr == 0 {
+        if !hr.is_err() {
             Ok($v)
         } else {
             Err(HassleError::Win32Error(hr))
@@ -143,15 +143,14 @@ struct DxcIncludeHandlerWrapperVtbl {
         *const com_rs::IUnknown,
         &com_rs::IID,
         *mut *mut core::ffi::c_void,
-    ) -> com_rs::HResult,
+    ) -> HRESULT,
     add_ref: extern "system" fn(*const com_rs::IUnknown) -> HRESULT,
     release: extern "system" fn(*const com_rs::IUnknown) -> HRESULT,
     #[cfg(not(windows))]
     complete_object_destructor: extern "system" fn(*const com_rs::IUnknown) -> HRESULT,
     #[cfg(not(windows))]
     deleting_destructor: extern "system" fn(*const com_rs::IUnknown) -> HRESULT,
-    load_source:
-        extern "system" fn(*mut com_rs::IUnknown, LPCWSTR, *mut *mut IDxcBlob) -> com_rs::HResult,
+    load_source: extern "system" fn(*mut com_rs::IUnknown, LPCWSTR, *mut *mut IDxcBlob) -> HRESULT,
 }
 
 #[repr(C)]
@@ -167,19 +166,19 @@ impl<'a> DxcIncludeHandlerWrapper<'a> {
         _me: *const com_rs::IUnknown,
         _rrid: &com_rs::IID,
         _ppv_obj: *mut *mut core::ffi::c_void,
-    ) -> com_rs::HResult {
-        0 // dummy impl
+    ) -> HRESULT {
+        0.into() // dummy impl
     }
 
     extern "system" fn dummy(_me: *const com_rs::IUnknown) -> HRESULT {
-        0 // dummy impl
+        0.into() // dummy impl
     }
 
     extern "system" fn load_source(
         me: *mut com_rs::IUnknown,
         filename: LPCWSTR,
         include_source: *mut *mut IDxcBlob,
-    ) -> com_rs::HResult {
+    ) -> HRESULT {
         let me = me as *mut DxcIncludeHandlerWrapper;
 
         let filename = crate::utils::from_wide(filename as *mut _);
@@ -205,6 +204,7 @@ impl<'a> DxcIncludeHandlerWrapper<'a> {
         } else {
             -2_147_024_894 // ERROR_FILE_NOT_FOUND / 0x80070002
         }
+        .into()
     }
 }
 
@@ -320,7 +320,7 @@ impl DxcCompiler {
             result.get_status(&mut compile_error);
         }
 
-        if result_hr == 0 && compile_error == 0 {
+        if !result_hr.is_err() && compile_error == 0 {
             Ok(DxcOperationResult::new(result))
         } else {
             Err((DxcOperationResult::new(result), result_hr))
@@ -375,7 +375,7 @@ impl DxcCompiler {
             result.get_status(&mut compile_error);
         }
 
-        if result_hr == 0 && compile_error == 0 {
+        if !result_hr.is_err() && compile_error == 0 {
             Ok((
                 DxcOperationResult::new(result),
                 from_wide(debug_filename),
@@ -425,7 +425,7 @@ impl DxcCompiler {
             result.get_status(&mut compile_error);
         }
 
-        if result_hr == 0 && compile_error == 0 {
+        if !result_hr.is_err() && compile_error == 0 {
             Ok(DxcOperationResult::new(result))
         } else {
             Err((DxcOperationResult::new(result), result_hr))
@@ -594,14 +594,15 @@ impl DxcValidator {
     pub fn version(&self) -> Result<DxcValidatorVersion, HRESULT> {
         let mut version: ComPtr<IDxcVersionInfo> = ComPtr::new();
 
-        let result_hr = unsafe {
-            self.inner
-                .query_interface(&IID_IDxcVersionInfo, version.as_mut_ptr())
-        };
-
-        if result_hr != 0 {
-            return Err(result_hr);
-        }
+        let version = check_hr!(
+            unsafe {
+                HRESULT(
+                    self.inner
+                        .query_interface(&IID_IDxcVersionInfo, version.as_mut_ptr()),
+                )
+            },
+            version
+        )?;
 
         let mut major = 0;
         let mut minor = 0;
@@ -625,7 +626,7 @@ impl DxcValidator {
         let mut validate_status = 0u32;
         unsafe { result.get_status(&mut validate_status) };
 
-        if result_hr == 0 && validate_status == 0 {
+        if !result_hr.is_err() && validate_status == 0 {
             Ok(blob)
         } else {
             Err((DxcOperationResult::new(result), result_hr))
