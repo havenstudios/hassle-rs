@@ -87,6 +87,18 @@ pub use os_defs::*;
 #[derive(PartialEq, Eq)]
 pub struct HRESULT(pub os_defs::HRESULT);
 impl HRESULT {
+    pub fn result(self) -> Result<(), Self> {
+        self.result_with_success(())
+    }
+
+    pub fn result_with_success<T>(self, v: T) -> Result<T, Self> {
+        if self.is_err() {
+            Ok(v)
+        } else {
+            Err(self)
+        }
+    }
+
     pub fn is_err(&self) -> bool {
         self.0 < 0
     }

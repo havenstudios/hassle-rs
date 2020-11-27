@@ -514,7 +514,9 @@ impl DxcLibrary {
         unsafe {
             self.inner
                 .get_blob_as_utf8(blob.inner.as_ptr(), blob_utf8.as_mut_ptr())
-        };
+        }
+        .result()
+        .unwrap();
 
         let slice = unsafe {
             std::slice::from_raw_parts(
@@ -633,7 +635,9 @@ impl DxcValidator {
         };
 
         if !result_hr.is_err() && !result.is_null() {
-            unsafe { result.get_status(&mut result_hr) };
+            unsafe { result.get_status(&mut result_hr) }
+                .result()
+                .unwrap();
         }
 
         if result_hr.is_err() {
