@@ -76,6 +76,8 @@ pub enum HassleError {
     WindowsOnly(String),
 }
 
+pub type Result<T, E = HassleError> = std::result::Result<T, E>;
+
 /// Helper function to directly compile a HLSL shader to an intermediate language,
 /// this function expects `dxcompiler.dll` to be available in the current
 /// executable environment.
@@ -90,7 +92,7 @@ pub fn compile_hlsl(
     target_profile: &str,
     args: &[&str],
     defines: &[(&str, Option<&str>)],
-) -> Result<Vec<u8>, HassleError> {
+) -> Result<Vec<u8>> {
     let dxc = Dxc::new(None)?;
 
     let compiler = dxc.create_compiler()?;
@@ -133,7 +135,7 @@ pub fn compile_hlsl(
 /// execution environment.
 ///
 /// `dxil.dll` is only available on Windows.
-pub fn validate_dxil(data: &[u8]) -> Result<Vec<u8>, HassleError> {
+pub fn validate_dxil(data: &[u8]) -> Result<Vec<u8>> {
     let dxc = Dxc::new(None)?;
     let dxil = Dxil::new(None)?;
 

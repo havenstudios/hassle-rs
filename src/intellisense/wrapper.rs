@@ -1,6 +1,6 @@
 use crate::intellisense::ffi::*;
 use crate::os::{CoTaskMemFree, BSTR, HRESULT, LPSTR};
-use crate::utils::HassleError;
+use crate::utils::{HassleError, Result};
 use crate::wrapper::Dxc;
 use com_rs::ComPtr;
 use std::ffi::CString;
@@ -515,7 +515,7 @@ impl DxcFile {
 }
 
 impl Dxc {
-    pub fn create_intellisense(&self) -> Result<DxcIntellisense, HassleError> {
+    pub fn create_intellisense(&self) -> Result<DxcIntellisense> {
         let mut intellisense: ComPtr<IDxcIntelliSense> = ComPtr::new();
         check_hr_wrapped!(
             self.get_dxc_create_instance()?(

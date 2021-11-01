@@ -49,6 +49,5 @@ pub mod wrapper;
 pub mod intellisense;
 
 pub use crate::ffi::*;
-pub use crate::utils::compile_hlsl;
-pub use crate::utils::validate_dxil;
+pub use crate::utils::{compile_hlsl, validate_dxil, Result};
 pub use crate::wrapper::*;

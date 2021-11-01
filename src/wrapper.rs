@@ -6,7 +6,7 @@
 
 use crate::ffi::*;
 use crate::os::{HRESULT, LPCWSTR, LPWSTR, WCHAR};
-use crate::utils::{from_wide, to_wide, HassleError};
+use crate::utils::{from_wide, to_wide, HassleError, Result};
 use com_rs::ComPtr;
 use libloading::{Library, Symbol};
 use std::ffi::c_void;
@@ -531,7 +531,7 @@ fn dxcompiler_lib_name() -> &'static Path {
 impl Dxc {
     /// `dxc_path` can point to a library directly or the directory containing the library,
     /// in which case the appended filename depends on the platform.
-    pub fn new(lib_path: Option<PathBuf>) -> Result<Self, HassleError> {
+    pub fn new(lib_path: Option<PathBuf>) -> Result<Self> {
         let lib_path = if let Some(lib_path) = lib_path {
             if lib_path.is_file() {
                 lib_path
@@ -550,13 +550,11 @@ impl Dxc {
         Ok(Self { dxc_lib })
     }
 
-    pub(crate) fn get_dxc_create_instance(
-        &self,
-    ) -> Result<Symbol<DxcCreateInstanceProc>, HassleError> {
+    pub(crate) fn get_dxc_create_instance(&self) -> Result<Symbol<DxcCreateInstanceProc>> {
         Ok(unsafe { self.dxc_lib.get(b"DxcCreateInstance\0")? })
     }
 
-    pub fn create_compiler(&self) -> Result<DxcCompiler, HassleError> {
+    pub fn create_compiler(&self) -> Result<DxcCompiler> {
         let mut compiler: ComPtr<IDxcCompiler2> = ComPtr::new();
         check_hr_wrapped!(
             self.get_dxc_create_instance()?(
@@ -568,7 +566,7 @@ impl Dxc {
         )
     }
 
-    pub fn create_library(&self) -> Result<DxcLibrary, HassleError> {
+    pub fn create_library(&self) -> Result<DxcLibrary> {
         let mut library: ComPtr<IDxcLibrary> = ComPtr::new();
         check_hr_wrapped!(
             self.get_dxc_create_instance()?(
@@ -642,7 +640,7 @@ pub struct Dxil {
 
 impl Dxil {
     #[cfg(not(windows))]
-    pub fn new(_: Option<PathBuf>) -> Result<Self, HassleError> {
+    pub fn new(_: Option<PathBuf>) -> Result<Self> {
         Err(HassleError::WindowsOnly(
             "DXIL Signing is only supported on Windows".to_string(),
         ))
@@ -651,7 +649,7 @@ impl Dxil {
     /// `dxil_path` can point to a library directly or the directory containing the library,
     /// in which case `dxil.dll` is appended.
     #[cfg(windows)]
-    pub fn new(lib_path: Option<PathBuf>) -> Result<Self, HassleError> {
+    pub fn new(lib_path: Option<PathBuf>) -> Result<Self> {
         let lib_path = if let Some(lib_path) = lib_path {
             if lib_path.is_file() {
                 lib_path
@@ -671,11 +669,11 @@ impl Dxil {
         Ok(Self { dxil_lib })
     }
 
-    fn get_dxc_create_instance(&self) -> Result<Symbol<DxcCreateInstanceProc>, HassleError> {
+    fn get_dxc_create_instance(&self) -> Result<Symbol<DxcCreateInstanceProc>> {
         Ok(unsafe { self.dxil_lib.get(b"DxcCreateInstance\0")? })
     }
 
-    pub fn create_validator(&self) -> Result<DxcValidator, HassleError> {
+    pub fn create_validator(&self) -> Result<DxcValidator> {
         let mut validator: ComPtr<IDxcValidator> = ComPtr::new();
         check_hr_wrapped!(
             self.get_dxc_create_instance()?(
