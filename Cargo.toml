@@ -26,7 +26,8 @@ default-target = "x86_64-pc-windows-msvc"
 
 [dependencies]
 libloading = "0.7.0"
-com-rs = "0.2.1"
+# https://github.com/microsoft/com-rs/pull/234
+com = { git = "https://github.com/MarijnS95/com-rs", rev = "c8256cb", features = ["production"] }
 bitflags = "1.2.1"
 widestring = "0.5.0"
 thiserror = "1.0"

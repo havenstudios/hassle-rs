@@ -7,18 +7,20 @@
 use crate::ffi::*;
 use crate::os::{HRESULT, LPCWSTR, LPWSTR, WCHAR};
 use crate::utils::{from_wide, to_wide, HassleError, Result};
-use com_rs::ComPtr;
+use com::production::Class;
+use com::{class, production::ClassAllocation, Interface};
 use libloading::{Library, Symbol};
+use std::cell::RefCell;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
-#[derive(Debug)]
 pub struct DxcBlob {
-    inner: ComPtr<IDxcBlob>,
+    inner: IDxcBlob,
 }
 
 impl DxcBlob {
-    fn new(inner: ComPtr<IDxcBlob>) -> Self {
+    fn new(inner: IDxcBlob) -> Self {
         Self { inner }
     }
 
@@ -60,30 +62,28 @@ impl AsMut<[u8]> for DxcBlob {
     }
 }
 
-#[derive(Debug)]
 pub struct DxcBlobEncoding {
-    inner: ComPtr<IDxcBlobEncoding>,
+    inner: IDxcBlobEncoding,
 }
 
 impl DxcBlobEncoding {
-    fn new(inner: ComPtr<IDxcBlobEncoding>) -> Self {
+    fn new(inner: IDxcBlobEncoding) -> Self {
         Self { inner }
     }
 }
 
 impl From<DxcBlobEncoding> for DxcBlob {
     fn from(encoded_blob: DxcBlobEncoding) -> Self {
-        DxcBlob::new((&encoded_blob.inner).into())
+        DxcBlob::new(encoded_blob.inner.query_interface::<IDxcBlob>().unwrap())
     }
 }
 
-#[derive(Debug)]
 pub struct DxcOperationResult {
-    inner: ComPtr<IDxcOperationResult>,
+    inner: IDxcOperationResult,
 }
 
 impl DxcOperationResult {
-    fn new(inner: ComPtr<IDxcOperationResult>) -> Self {
+    fn new(inner: IDxcOperationResult) -> Self {
         Self { inner }
     }
 
@@ -93,16 +93,16 @@ impl DxcOperationResult {
     }
 
     pub fn get_result(&self) -> Result<DxcBlob> {
-        let mut blob: ComPtr<IDxcBlob> = ComPtr::new();
-        unsafe { self.inner.get_result(blob.as_mut_ptr()) }.result()?;
-        Ok(DxcBlob::new(blob))
+        let mut blob = None;
+        unsafe { self.inner.get_result(&mut blob) }.result()?;
+        Ok(DxcBlob::new(blob.unwrap()))
     }
 
     pub fn get_error_buffer(&self) -> Result<DxcBlobEncoding> {
-        let mut blob: ComPtr<IDxcBlobEncoding> = ComPtr::new();
+        let mut blob = None;
 
-        unsafe { self.inner.get_error_buffer(blob.as_mut_ptr()) }.result()?;
-        Ok(DxcBlobEncoding::new(blob))
+        unsafe { self.inner.get_error_buffer(&mut blob) }.result()?;
+        Ok(DxcBlobEncoding::new(blob.unwrap()))
     }
 }
 
@@ -110,85 +110,131 @@ pub trait DxcIncludeHandler {
     fn load_source(&mut self, filename: String) -> Option<String>;
 }
 
-#[repr(C)]
-struct DxcIncludeHandlerWrapperVtbl {
-    query_interface: extern "system" fn(
-        *const com_rs::IUnknown,
-        &com_rs::IID,
-        *mut *mut core::ffi::c_void,
-    ) -> HRESULT,
-    add_ref: extern "system" fn(*const com_rs::IUnknown) -> HRESULT,
-    release: extern "system" fn(*const com_rs::IUnknown) -> HRESULT,
-    #[cfg(not(windows))]
-    complete_object_destructor: extern "system" fn(*const com_rs::IUnknown) -> HRESULT,
-    #[cfg(not(windows))]
-    deleting_destructor: extern "system" fn(*const com_rs::IUnknown) -> HRESULT,
-    load_source: extern "system" fn(*mut com_rs::IUnknown, LPCWSTR, *mut *mut IDxcBlob) -> HRESULT,
-}
+class! {
+    #[no_class_factory]
+    class DxcIncludeHandlerWrapper: IDxcIncludeHandler(IDxcUnknownShim) {
+        // Com-rs intentionally does not support lifetimes in its class structs
+        // since they live on the heap and their lifetime can be prolonged for
+        // as long as someone keeps a reference through `add_ref()`.
+        // The only way for us to access the library and handler implementation,
+        // which are now intentionally behind a borrow to signify our promise
+        // regarding lifetime, is by transmuting them away and "ensuring" the
+        // class object is discarded at the end of our function call.
 
-#[repr(C)]
-struct DxcIncludeHandlerWrapper<'a, 'i> {
-    vtable: Box<DxcIncludeHandlerWrapperVtbl>,
-    handler: &'i mut dyn DxcIncludeHandler,
-    pinned: Vec<Pin<String>>,
-    library: &'a DxcLibrary,
-}
+        library: &'static DxcLibrary,
+        handler: RefCell<&'static mut dyn DxcIncludeHandler>,
 
-impl<'a, 'i> DxcIncludeHandlerWrapper<'a, 'i> {
-    extern "system" fn query_interface(
-        _me: *const com_rs::IUnknown,
-        _rrid: &com_rs::IID,
-        _ppv_obj: *mut *mut core::ffi::c_void,
-    ) -> HRESULT {
-        HRESULT(0) // dummy impl
+        pinned: RefCell<Vec<Pin<String>>>,
     }
 
-    extern "system" fn dummy(_me: *const com_rs::IUnknown) -> HRESULT {
-        HRESULT(0) // dummy impl
-    }
-
-    extern "system" fn load_source(
-        me: *mut com_rs::IUnknown,
-        filename: LPCWSTR,
-        include_source: *mut *mut IDxcBlob,
-    ) -> HRESULT {
-        let me = me.cast::<DxcIncludeHandlerWrapper>();
-
-        let filename = crate::utils::from_wide(filename);
-
-        let source = unsafe { (*me).handler.load_source(filename) };
-
-        if let Some(source) = source {
-            let source = Pin::new(source);
-            let mut blob = unsafe {
-                (*me)
-                    .library
-                    .create_blob_with_encoding_from_str(&source)
-                    .unwrap()
-            };
-
-            unsafe {
-                blob.inner.add_ref();
-                *include_source = *blob.inner.as_mut_ptr();
-                (*me).pinned.push(source);
-            }
-
-            0
-        } else {
-            -2_147_024_894 // ERROR_FILE_NOT_FOUND / 0x80070002
+    impl IDxcUnknownShim for DxcIncludeHandlerWrapper {
+        #[cfg(not(windows))]
+        fn complete_object_destructor(&self) -> HRESULT {
+            HRESULT(0)
         }
-        .into()
+        #[cfg(not(windows))]
+        fn deleting_destructor(&self) -> HRESULT {
+            HRESULT(0)
+        }
+    }
+
+    impl IDxcIncludeHandler for DxcIncludeHandlerWrapper {
+        fn load_source(&self, filename: LPCWSTR, include_source: *mut Option<IDxcBlob>) -> HRESULT {
+            let filename = crate::utils::from_wide(filename);
+
+            let mut handler = self.handler.borrow_mut();
+            let source = handler.load_source(filename);
+
+            if let Some(source) = source {
+                let source = Pin::new(source);
+                let blob = self.library
+                    .create_blob_with_encoding_from_str(&source)
+                    .unwrap();
+
+                unsafe { *include_source = Some(DxcBlob::from(blob).inner) };
+                self.pinned.borrow_mut().push(source);
+
+                // NOERROR
+                0
+            } else {
+                -2_147_024_894 // ERROR_FILE_NOT_FOUND / 0x80070002
+            }
+            .into()
+        }
     }
 }
 
-#[derive(Debug)]
+/// Represents a reference to a COM object that should only live as long as itself
+///
+/// In other words, on [`drop()`] we should be able to decrement the refcount to zero.
+/// This object functions a lot like [`ClassAllocation`]: see its similar [`drop()`]
+/// implementation for details.
+///
+/// Note that COM objects live on the heap by design, because of this refcount system.
+struct LocalClassAllocation<T: Class>(core::pin::Pin<Box<T>>);
+
+impl<T: Class> LocalClassAllocation<T> {
+    fn new(allocation: ClassAllocation<T>) -> Self {
+        // TODO: There is no way to take the internal, owned box out of com-rs's
+        // allocation wrapper.
+        // https://github.com/microsoft/com-rs/issues/236 covers this issue as a whole,
+        // including lifetime support and this `LocalClassAllocation` upstream.
+        let inner: core::mem::ManuallyDrop<core::pin::Pin<Box<T>>> =
+            unsafe { std::mem::transmute(allocation) };
+
+        Self(core::mem::ManuallyDrop::into_inner(inner))
+    }
+
+    // TODO: Return a borrow of this interface?
+    // query_interface() is not behind one of the traits
+    // fn query_interface<T>(&self) -> Option<T> {
+    //     self.0.query_interface::<T>().unwrap()
+    // }
+}
+
+impl<T: Class> Deref for LocalClassAllocation<T> {
+    type Target = core::pin::Pin<Box<T>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: Class> Drop for LocalClassAllocation<T> {
+    fn drop(&mut self) {
+        // Check if we are the only remaining reference to this object
+        assert_eq!(
+            unsafe { self.0.dec_ref_count() },
+            0,
+            "COM object is still referenced"
+        );
+        // Now that we're the last one to give up our refcount, it is safe
+        // for the internal object to get dropped.
+    }
+}
+
+impl DxcIncludeHandlerWrapper {
+    /// SAFETY: Make sure the returned object does _not_ outlive the lifetime
+    /// of either `library` nor `include_handler`
+    unsafe fn create_include_handler(
+        library: &'_ DxcLibrary,
+        include_handler: &'_ mut dyn DxcIncludeHandler,
+    ) -> LocalClassAllocation<DxcIncludeHandlerWrapper> {
+        LocalClassAllocation::new(Self::allocate(
+            std::mem::transmute(library),
+            RefCell::new(std::mem::transmute(include_handler)),
+            RefCell::new(vec![]),
+        ))
+    }
+}
+
 pub struct DxcCompiler {
-    inner: ComPtr<IDxcCompiler2>,
+    inner: IDxcCompiler2,
     library: DxcLibrary,
 }
 
 impl DxcCompiler {
-    fn new(inner: ComPtr<IDxcCompiler2>, library: DxcLibrary) -> Self {
+    fn new(inner: IDxcCompiler2, library: DxcLibrary) -> Self {
         Self { inner, library }
     }
 
@@ -223,33 +269,6 @@ impl DxcCompiler {
         }
     }
 
-    fn prep_include_handler<'a, 'i>(
-        library: &'a DxcLibrary,
-        include_handler: Option<&'i mut dyn DxcIncludeHandler>,
-    ) -> Option<Box<DxcIncludeHandlerWrapper<'a, 'i>>> {
-        if let Some(include_handler) = include_handler {
-            let vtable = DxcIncludeHandlerWrapperVtbl {
-                query_interface: DxcIncludeHandlerWrapper::query_interface,
-                add_ref: DxcIncludeHandlerWrapper::dummy,
-                release: DxcIncludeHandlerWrapper::dummy,
-                #[cfg(not(windows))]
-                complete_object_destructor: DxcIncludeHandlerWrapper::dummy,
-                #[cfg(not(windows))]
-                deleting_destructor: DxcIncludeHandlerWrapper::dummy,
-                load_source: DxcIncludeHandlerWrapper::load_source,
-            };
-
-            Some(Box::new(DxcIncludeHandlerWrapper {
-                vtable: Box::new(vtable),
-                handler: include_handler,
-                library,
-                pinned: vec![],
-            }))
-        } else {
-            None
-        }
-    }
-
     pub fn compile(
         &self,
         blob: &DxcBlobEncoding,
@@ -268,12 +287,19 @@ impl DxcCompiler {
         let mut dxc_defines = vec![];
         Self::prep_defines(defines, &mut wide_defines, &mut dxc_defines);
 
-        let handler_wrapper = Self::prep_include_handler(&self.library, include_handler);
+        // Keep alive on the stack
+        let include_handler = include_handler.map(|include_handler| unsafe {
+            DxcIncludeHandlerWrapper::create_include_handler(&self.library, include_handler)
+        });
+        // TODO: query_interface() should have a borrow on LocalClassAllocation to prevent things going kaboom
+        let include_handler = include_handler
+            .as_ref()
+            .map(|i| i.query_interface().unwrap());
 
-        let mut result: ComPtr<IDxcOperationResult> = ComPtr::new();
+        let mut result = None;
         let result_hr = unsafe {
             self.inner.compile(
-                blob.inner.as_ptr(),
+                &blob.inner,
                 to_wide(source_name).as_ptr(),
                 to_wide(entry_point).as_ptr(),
                 to_wide(target_profile).as_ptr(),
@@ -281,12 +307,12 @@ impl DxcCompiler {
                 dxc_args.len() as u32,
                 dxc_defines.as_ptr(),
                 dxc_defines.len() as u32,
-                handler_wrapper
-                    .as_ref()
-                    .map_or(std::ptr::null(), |v| &**v as *const _ as *const _),
-                result.as_mut_ptr(),
+                &include_handler,
+                &mut result,
             )
         };
+
+        let result = result.unwrap();
 
         let mut compile_error = 0u32;
         let status_hr = unsafe { result.get_status(&mut compile_error) };
@@ -316,15 +342,21 @@ impl DxcCompiler {
         let mut dxc_defines = vec![];
         Self::prep_defines(defines, &mut wide_defines, &mut dxc_defines);
 
-        let handler_wrapper = Self::prep_include_handler(&self.library, include_handler);
+        // Keep alive on the stack
+        let include_handler = include_handler.map(|include_handler| unsafe {
+            DxcIncludeHandlerWrapper::create_include_handler(&self.library, include_handler)
+        });
+        let include_handler = include_handler
+            .as_ref()
+            .map(|i| i.query_interface().unwrap());
 
-        let mut result: ComPtr<IDxcOperationResult> = ComPtr::new();
-        let mut debug_blob: ComPtr<IDxcBlob> = ComPtr::new();
+        let mut result = None;
+        let mut debug_blob = None;
         let mut debug_filename: LPWSTR = std::ptr::null_mut();
 
         let result_hr = unsafe {
             self.inner.compile_with_debug(
-                blob.inner.as_ptr(),
+                &blob.inner,
                 to_wide(source_name).as_ptr(),
                 to_wide(entry_point).as_ptr(),
                 to_wide(target_profile).as_ptr(),
@@ -332,14 +364,14 @@ impl DxcCompiler {
                 dxc_args.len() as u32,
                 dxc_defines.as_ptr(),
                 dxc_defines.len() as u32,
-                handler_wrapper
-                    .as_ref()
-                    .map_or(std::ptr::null(), |v| &**v as *const _ as *const _),
-                result.as_mut_ptr(),
+                include_handler,
+                &mut result,
                 &mut debug_filename,
-                debug_blob.as_mut_ptr(),
+                &mut debug_blob,
             )
         };
+        let result = result.unwrap();
+        let debug_blob = debug_blob.unwrap();
 
         let mut compile_error = 0u32;
         let status_hr = unsafe { result.get_status(&mut compile_error) };
@@ -371,23 +403,29 @@ impl DxcCompiler {
         let mut dxc_defines = vec![];
         Self::prep_defines(defines, &mut wide_defines, &mut dxc_defines);
 
-        let handler_wrapper = Self::prep_include_handler(&self.library, include_handler);
+        // Keep alive on the stack
+        let include_handler = include_handler.map(|include_handler| unsafe {
+            DxcIncludeHandlerWrapper::create_include_handler(&self.library, include_handler)
+        });
+        let include_handler = include_handler
+            .as_ref()
+            .map(|i| i.query_interface().unwrap());
 
-        let mut result: ComPtr<IDxcOperationResult> = ComPtr::new();
+        let mut result = None;
         let result_hr = unsafe {
             self.inner.preprocess(
-                blob.inner.as_ptr(),
+                &blob.inner,
                 to_wide(source_name).as_ptr(),
                 dxc_args.as_ptr(),
                 dxc_args.len() as u32,
                 dxc_defines.as_ptr(),
                 dxc_defines.len() as u32,
-                handler_wrapper
-                    .as_ref()
-                    .map_or(std::ptr::null(), |v| &**v as *const _ as *const _),
-                result.as_mut_ptr(),
+                include_handler,
+                &mut result,
             )
         };
+
+        let result = result.unwrap();
 
         let mut compile_error = 0u32;
         let status_hr = unsafe { result.get_status(&mut compile_error) };
@@ -400,43 +438,39 @@ impl DxcCompiler {
     }
 
     pub fn disassemble(&self, blob: &DxcBlob) -> Result<DxcBlobEncoding> {
-        let mut result_blob: ComPtr<IDxcBlobEncoding> = ComPtr::new();
-        unsafe {
-            self.inner
-                .disassemble(blob.inner.as_ptr(), result_blob.as_mut_ptr())
-        }
-        .result()?;
-        Ok(DxcBlobEncoding::new(result_blob))
+        let mut result_blob = None;
+        unsafe { self.inner.disassemble(&blob.inner, &mut result_blob) }.result()?;
+        Ok(DxcBlobEncoding::new(result_blob.unwrap()))
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct DxcLibrary {
-    inner: ComPtr<IDxcLibrary>,
+    inner: IDxcLibrary,
 }
 
 impl DxcLibrary {
-    fn new(inner: ComPtr<IDxcLibrary>) -> Self {
+    fn new(inner: IDxcLibrary) -> Self {
         Self { inner }
     }
 
     pub fn create_blob_with_encoding(&self, data: &[u8]) -> Result<DxcBlobEncoding> {
-        let mut blob: ComPtr<IDxcBlobEncoding> = ComPtr::new();
+        let mut blob = None;
 
         unsafe {
             self.inner.create_blob_with_encoding_from_pinned(
                 data.as_ptr().cast(),
                 data.len() as u32,
                 0, // Binary; no code page
-                blob.as_mut_ptr(),
+                &mut blob,
             )
         }
         .result()?;
-        Ok(DxcBlobEncoding::new(blob))
+        Ok(DxcBlobEncoding::new(blob.unwrap()))
     }
 
     pub fn create_blob_with_encoding_from_str(&self, text: &str) -> Result<DxcBlobEncoding> {
-        let mut blob: ComPtr<IDxcBlobEncoding> = ComPtr::new();
+        let mut blob = None;
         const CP_UTF8: u32 = 65001; // UTF-8 translation
 
         unsafe {
@@ -444,23 +478,21 @@ impl DxcLibrary {
                 text.as_ptr().cast(),
                 text.len() as u32,
                 CP_UTF8,
-                blob.as_mut_ptr(),
+                &mut blob,
             )
         }
         .result()?;
-        Ok(DxcBlobEncoding::new(blob))
+        Ok(DxcBlobEncoding::new(blob.unwrap()))
     }
 
     pub fn get_blob_as_string(&self, blob: &DxcBlob) -> Result<String> {
-        let mut blob_utf8: ComPtr<IDxcBlobEncoding> = ComPtr::new();
+        let mut blob_utf8 = None;
 
-        unsafe {
-            self.inner
-                .get_blob_as_utf8(blob.inner.as_ptr(), blob_utf8.as_mut_ptr())
-        }
-        .result()?;
+        unsafe { self.inner.get_blob_as_utf8(&blob.inner, &mut blob_utf8) }.result()?;
 
-        Ok(String::from_utf8(DxcBlob::new((&blob_utf8).into()).to_vec()).unwrap())
+        let blob_utf8 = blob_utf8.unwrap();
+
+        Ok(String::from_utf8(DxcBlob::new(blob_utf8.query_interface().unwrap()).to_vec()).unwrap())
     }
 }
 
@@ -506,51 +538,45 @@ impl Dxc {
         Ok(Self { dxc_lib })
     }
 
-    pub(crate) fn get_dxc_create_instance(&self) -> Result<Symbol<DxcCreateInstanceProc>> {
+    pub(crate) fn get_dxc_create_instance<T>(&self) -> Result<Symbol<DxcCreateInstanceProc<T>>> {
         Ok(unsafe { self.dxc_lib.get(b"DxcCreateInstance\0")? })
     }
 
     pub fn create_compiler(&self) -> Result<DxcCompiler> {
-        let mut compiler: ComPtr<IDxcCompiler2> = ComPtr::new();
+        let mut compiler = None;
 
-        self.get_dxc_create_instance()?(
-            &CLSID_DxcCompiler,
-            &IID_IDxcCompiler2,
-            compiler.as_mut_ptr(),
-        )
-        .result()?;
-        Ok(DxcCompiler::new(compiler, self.create_library()?))
+        self.get_dxc_create_instance()?(&CLSID_DxcCompiler, &IDxcCompiler2::IID, &mut compiler)
+            .result()?;
+        Ok(DxcCompiler::new(
+            compiler.unwrap(),
+            self.create_library().unwrap(),
+        ))
     }
 
     pub fn create_library(&self) -> Result<DxcLibrary> {
-        let mut library: ComPtr<IDxcLibrary> = ComPtr::new();
-
-        self.get_dxc_create_instance()?(&CLSID_DxcLibrary, &IID_IDxcLibrary, library.as_mut_ptr())
+        let mut library = None;
+        self.get_dxc_create_instance()?(&CLSID_DxcLibrary, &IDxcLibrary::IID, &mut library)
             .result()?;
-        Ok(DxcLibrary::new(library))
+        Ok(DxcLibrary::new(library.unwrap()))
     }
 }
 
-#[derive(Debug)]
 pub struct DxcValidator {
-    inner: ComPtr<IDxcValidator>,
+    inner: IDxcValidator,
 }
 
 pub type DxcValidatorVersion = (u32, u32);
 
 impl DxcValidator {
-    fn new(inner: ComPtr<IDxcValidator>) -> Self {
+    fn new(inner: IDxcValidator) -> Self {
         Self { inner }
     }
 
     pub fn version(&self) -> Result<DxcValidatorVersion> {
-        let mut version: ComPtr<IDxcVersionInfo> = ComPtr::new();
-
-        HRESULT::from(unsafe {
-            self.inner
-                .query_interface(&IID_IDxcVersionInfo, version.as_mut_ptr())
-        })
-        .result()?;
+        let version = self
+            .inner
+            .query_interface::<IDxcVersionInfo>()
+            .ok_or(HassleError::Win32Error(HRESULT(com::sys::E_NOINTERFACE)))?;
 
         let mut major = 0;
         let mut minor = 0;
@@ -559,14 +585,13 @@ impl DxcValidator {
     }
 
     pub fn validate(&self, blob: DxcBlob) -> Result<DxcBlob, (DxcOperationResult, HassleError)> {
-        let mut result: ComPtr<IDxcOperationResult> = ComPtr::new();
+        let mut result = None;
         let result_hr = unsafe {
-            self.inner.validate(
-                blob.inner.as_ptr(),
-                DXC_VALIDATOR_FLAGS_IN_PLACE_EDIT,
-                result.as_mut_ptr(),
-            )
+            self.inner
+                .validate(&blob.inner, DXC_VALIDATOR_FLAGS_IN_PLACE_EDIT, &mut result)
         };
+
+        let result = result.unwrap();
 
         let mut validate_status = 0u32;
         let status_hr = unsafe { result.get_status(&mut validate_status) };
@@ -618,19 +643,14 @@ impl Dxil {
         Ok(Self { dxil_lib })
     }
 
-    fn get_dxc_create_instance(&self) -> Result<Symbol<DxcCreateInstanceProc>> {
+    fn get_dxc_create_instance<T>(&self) -> Result<Symbol<DxcCreateInstanceProc<T>>> {
         Ok(unsafe { self.dxil_lib.get(b"DxcCreateInstance\0")? })
     }
 
     pub fn create_validator(&self) -> Result<DxcValidator> {
-        let mut validator: ComPtr<IDxcValidator> = ComPtr::new();
-
-        self.get_dxc_create_instance()?(
-            &CLSID_DxcValidator,
-            &IID_IDxcValidator,
-            validator.as_mut_ptr(),
-        )
-        .result()?;
-        Ok(DxcValidator::new(validator))
+        let mut validator = None;
+        self.get_dxc_create_instance()?(&CLSID_DxcValidator, &IDxcValidator::IID, &mut validator)
+            .result()?;
+        Ok(DxcValidator::new(validator.unwrap()))
     }
 }

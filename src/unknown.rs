@@ -1,14 +1,9 @@
 #[cfg(not(windows))]
 use crate::os::HRESULT;
-use com_rs::{com_interface, IUnknown, IID};
-
-extern "C" {
-    static IID_IUnknown: IID;
-}
+use com::{interfaces, interfaces::IUnknown};
 
 #[cfg(not(windows))]
-// Steal the interface ID from IUnknown:
-com_interface! {
+interfaces! {
     /// Insert complete object and deleting destructor on non-Windows platforms, where Dxc shims IUnknown in WinAdapter.
     /// This requires a virtual destructor (delete is actually used on the base class) which unfortunately makes the struct
     /// binary incompatible.
@@ -32,19 +27,20 @@ com_interface! {
     /// [13]: 0x7ffff6a56dd0 <DxcLibrary::GetBlobAsUtf8(IDxcBlob*, IDxcBlobEncoding**)>
     /// [14]: 0x7ffff6a56e90 <DxcLibrary::GetBlobAsUtf16(IDxcBlob*, IDxcBlobEncoding**)>
     /// ```
-    interface IDxcUnknownShim: IUnknown {
-        iid: IID_IUnknown,
-        vtable: IDxcUnknownShimVtbl,
-        fn complete_object_destructor() -> HRESULT;
-        fn deleting_destructor() -> HRESULT;
+    // Steal the interface ID from IUnknown:
+    #[uuid("00000000-0000-0000-C000-000000000046")]
+    pub(crate) unsafe interface IDxcUnknownShim: IUnknown {
+        fn complete_object_destructor(&self) -> HRESULT;
+        fn deleting_destructor(&self) -> HRESULT;
     }
 }
 
 #[cfg(windows)]
-com_interface! {
+// pub(crate) type IDxcUnknownShim = IUnknown;
+interfaces! {
     /// Forwards to IUnknown. No-op on Windows
-    interface IDxcUnknownShim: IUnknown {
-        iid: IID_IUnknown,
-        vtable: IDxcUnknownShimVtbl,
+    // Steal the interface ID from IUnknown:
+    #[uuid("00000000-0000-0000-C000-000000000046")]
+    pub(crate) unsafe interface IDxcUnknownShim: IUnknown {
     }
 }
